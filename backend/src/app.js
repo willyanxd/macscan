@@ -7,7 +7,6 @@ import winston from 'winston';
 import { initializeDatabase } from './database/init.js';
 import jobsRouter from './routes/jobs.js';
 import notificationsRouter from './routes/notifications.js';
-import networkRouter from './routes/network.js';
 import { JobScheduler } from './services/JobScheduler.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -21,7 +20,7 @@ const logger = winston.createLogger({
     winston.format.errors({ stack: true }),
     winston.format.json()
   ),
-  defaultMeta: { service: 'arp-monitoring' },
+  defaultMeta: { service: 'mac-monitoring' },
   transports: [
     new winston.transports.File({ filename: 'logs/error.log', level: 'error' }),
     new winston.transports.File({ filename: 'logs/combined.log' }),
@@ -66,7 +65,6 @@ app.use((req, res, next) => {
 // Routes
 app.use('/api/jobs', jobsRouter);
 app.use('/api/notifications', notificationsRouter);
-app.use('/api/network', networkRouter);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
@@ -74,8 +72,9 @@ app.get('/api/health', (req, res) => {
     status: 'ok', 
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
-    version: '1.0.0',
-    environment: process.env.NODE_ENV || 'development'
+    version: '2.0.0',
+    environment: process.env.NODE_ENV || 'development',
+    features: ['ssh-mac-scan', 'multi-host', 'console']
   });
 });
 
@@ -106,10 +105,11 @@ async function startServer() {
 
     // Start server
     app.listen(PORT, '0.0.0.0', () => {
-      logger.info(`ARP Monitoring API server running on port ${PORT}`);
+      logger.info(`MAC Monitoring API server running on port ${PORT}`);
       logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
       logger.info('Server ready to accept connections from any IP address');
       logger.info(`Health check: http://0.0.0.0:${PORT}/api/health`);
+      logger.info('Features: SSH MAC scanning, Multi-host support, SSH Console');
     });
 
   } catch (error) {

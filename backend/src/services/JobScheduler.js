@@ -1,7 +1,7 @@
 import cron from 'node-cron';
 import winston from 'winston';
 import { getDatabase } from '../database/init.js';
-import { JobRunner } from './JobRunner.js';
+import { MacScanRunner } from './MacScanRunner.js';
 
 const logger = winston.createLogger({
   level: 'info',
@@ -19,7 +19,7 @@ const logger = winston.createLogger({
 export class JobScheduler {
   constructor() {
     this.scheduledJobs = new Map();
-    this.jobRunner = new JobRunner();
+    this.macScanRunner = new MacScanRunner();
   }
 
   async initialize() {
@@ -76,7 +76,7 @@ export class JobScheduler {
     const task = cron.schedule(cronExpression, async () => {
       try {
         logger.info(`Running scheduled job: ${job.name}`);
-        await this.jobRunner.runJob(job.id);
+        await this.macScanRunner.runJob(job.id);
       } catch (error) {
         logger.error(`Scheduled job failed: ${job.name} - ${error.message}`);
       }
@@ -184,13 +184,13 @@ export class JobScheduler {
     
     for (const job of jobsToRun) {
       // Don't run if already running
-      if (this.jobRunner.isJobRunning(job.id)) {
+      if (this.macScanRunner.isJobRunning(job.id)) {
         continue;
       }
 
       try {
         logger.info(`Running overdue job: ${job.name}`);
-        await this.jobRunner.runJob(job.id);
+        await this.macScanRunner.runJob(job.id);
         this.updateNextRunTime(job.id, job.schedule);
       } catch (error) {
         logger.error(`Overdue job failed: ${job.name} - ${error.message}`);
@@ -204,8 +204,8 @@ export class JobScheduler {
   getStatus() {
     return {
       scheduledJobsCount: this.scheduledJobs.size,
-      runningJobsCount: this.jobRunner.getRunningJobs().length,
-      runningJobs: this.jobRunner.getRunningJobs()
+      runningJobsCount: this.macScanRunner.getRunningJobs().length,
+      runningJobs: this.macScanRunner.getRunningJobs()
     };
   }
 }

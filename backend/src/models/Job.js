@@ -1,13 +1,12 @@
 import { v4 as uuidv4 } from 'uuid';
 import { getDatabase } from '../database/init.js';
+import { CryptoService } from '../services/CryptoService.js';
 
 export class Job {
   constructor(data) {
     this.id = data.id || uuidv4();
     this.name = data.name;
-    this.network_interface = data.network_interface;
-    this.subnet = data.subnet;
-    this.execution_time = data.execution_time || 300;
+    this.vlan_id = data.vlan_id || null;
     this.schedule = data.schedule || 'manual';
     this.notifications_enabled = data.notifications_enabled !== false;
     this.notify_new_macs = data.notify_new_macs !== false;
@@ -17,6 +16,7 @@ export class Job {
     this.retention_days = data.retention_days || 30;
     this.status = data.status || 'active';
     this.whitelist = data.whitelist || [];
+    this.ssh_hosts = data.ssh_hosts || [];
   }
 
   async save() {
@@ -25,9 +25,7 @@ export class Job {
     const jobData = {
       id: this.id,
       name: this.name,
-      network_interface: this.network_interface,
-      subnet: this.subnet,
-      execution_time: this.execution_time,
+      vlan_id: this.vlan_id,
       schedule: this.schedule,
       notifications_enabled: this.notifications_enabled ? 1 : 0,
       notify_new_macs: this.notify_new_macs ? 1 : 0,
@@ -43,11 +41,11 @@ export class Job {
       // Insert/update job
       const stmt = db.prepare(`
         INSERT OR REPLACE INTO jobs 
-        (id, name, network_interface, subnet, execution_time, schedule, notifications_enabled, 
+        (id, name, vlan_id, schedule, notifications_enabled, 
          notify_new_macs, notify_unauthorized_macs, notify_ip_changes, retention_policy, 
          retention_days, status)
         VALUES 
-        (@id, @name, @network_interface, @subnet, @execution_time, @schedule, @notifications_enabled,
+        (@id, @name, @vlan_id, @schedule, @notifications_enabled,
          @notify_new_macs, @notify_unauthorized_macs, @notify_ip_changes, @retention_policy,
          @retention_days, @status)
       `);
@@ -68,6 +66,32 @@ export class Job {
           insertWhitelist.run(uuidv4(), this.id, mac);
         }
       }
+
+      // Clear existing SSH hosts
+      const clearHosts = db.prepare('DELETE FROM ssh_hosts WHERE job_id = ?');
+      clearHosts.run(this.id);
+
+      // Insert new SSH hosts
+      if (this.ssh_hosts && this.ssh_hosts.length > 0) {
+        const insertHost = db.prepare(`
+          INSERT INTO ssh_hosts (id, job_id, name, host, port, username, password_encrypted, enabled) 
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+        
+        for (const host of this.ssh_hosts) {
+          const encryptedPassword = CryptoService.encrypt(host.password);
+          insertHost.run(
+            host.id || uuidv4(), 
+            this.id, 
+            host.name, 
+            host.host, 
+            host.port || 22, 
+            host.username, 
+            encryptedPassword,
+            host.enabled !== false ? 1 : 0
+          );
+        }
+      }
     });
 
     transaction();
@@ -85,13 +109,22 @@ export class Job {
     const whitelistStmt = db.prepare('SELECT mac_address FROM job_whitelist WHERE job_id = ?');
     const whitelist = whitelistStmt.all(id).map(row => row.mac_address);
 
+    // Get SSH hosts
+    const hostsStmt = db.prepare('SELECT * FROM ssh_hosts WHERE job_id = ?');
+    const ssh_hosts = hostsStmt.all(id).map(host => ({
+      ...host,
+      password: CryptoService.maskPassword(CryptoService.decrypt(host.password_encrypted)),
+      enabled: Boolean(host.enabled)
+    }));
+
     return {
       ...jobData,
       notifications_enabled: Boolean(jobData.notifications_enabled),
       notify_new_macs: Boolean(jobData.notify_new_macs),
       notify_unauthorized_macs: Boolean(jobData.notify_unauthorized_macs),
       notify_ip_changes: Boolean(jobData.notify_ip_changes),
-      whitelist
+      whitelist,
+      ssh_hosts
     };
   }
 
@@ -100,17 +133,28 @@ export class Job {
     const stmt = db.prepare('SELECT * FROM jobs ORDER BY created_at DESC');
     const jobs = stmt.all();
 
-    // Get whitelist for each job
+    // Get whitelist and SSH hosts for each job
     const whitelistStmt = db.prepare('SELECT mac_address FROM job_whitelist WHERE job_id = ?');
+    const hostsStmt = db.prepare('SELECT * FROM ssh_hosts WHERE job_id = ?');
     
-    return jobs.map(job => ({
-      ...job,
-      notifications_enabled: Boolean(job.notifications_enabled),
-      notify_new_macs: Boolean(job.notify_new_macs),
-      notify_unauthorized_macs: Boolean(job.notify_unauthorized_macs),
-      notify_ip_changes: Boolean(job.notify_ip_changes),
-      whitelist: whitelistStmt.all(job.id).map(row => row.mac_address)
-    }));
+    return jobs.map(job => {
+      const whitelist = whitelistStmt.all(job.id).map(row => row.mac_address);
+      const ssh_hosts = hostsStmt.all(job.id).map(host => ({
+        ...host,
+        password: CryptoService.maskPassword(CryptoService.decrypt(host.password_encrypted)),
+        enabled: Boolean(host.enabled)
+      }));
+
+      return {
+        ...job,
+        notifications_enabled: Boolean(job.notifications_enabled),
+        notify_new_macs: Boolean(job.notify_new_macs),
+        notify_unauthorized_macs: Boolean(job.notify_unauthorized_macs),
+        notify_ip_changes: Boolean(job.notify_ip_changes),
+        whitelist,
+        ssh_hosts
+      };
+    });
   }
 
   static async delete(id) {

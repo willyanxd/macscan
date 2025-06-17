@@ -1,11 +1,13 @@
 import express from 'express';
 import { Job } from '../models/Job.js';
-import { JobRunner } from '../services/JobRunner.js';
+import { MacScanRunner } from '../services/MacScanRunner.js';
+import { SSHService } from '../services/SSHService.js';
+import { CryptoService } from '../services/CryptoService.js';
 import { getDatabase } from '../database/init.js';
-import { NetworkService } from '../services/NetworkService.js';
 
 const router = express.Router();
-const jobRunner = new JobRunner();
+const macScanRunner = new MacScanRunner();
+const sshService = new SSHService();
 
 // Get all jobs
 router.get('/', async (req, res) => {
@@ -36,18 +38,23 @@ router.get('/:id', async (req, res) => {
 router.post('/', async (req, res) => {
   try {
     // Validate required fields
-    const { name, network_interface, subnet } = req.body;
+    const { name, ssh_hosts } = req.body;
     
-    if (!name || !network_interface || !subnet) {
-      return res.status(400).json({ message: 'Name, network interface, and subnet are required' });
+    if (!name) {
+      return res.status(400).json({ message: 'Job name is required' });
     }
 
-    // Validate interface and subnet compatibility
-    const isValid = await NetworkService.validateInterfaceSubnet(network_interface, subnet);
-    if (!isValid) {
-      return res.status(400).json({ 
-        message: 'Network interface does not have an IP address in the specified subnet' 
-      });
+    if (!ssh_hosts || ssh_hosts.length === 0) {
+      return res.status(400).json({ message: 'At least one SSH host is required' });
+    }
+
+    // Validate SSH hosts
+    for (const host of ssh_hosts) {
+      if (!host.name || !host.host || !host.username || !host.password) {
+        return res.status(400).json({ 
+          message: 'All SSH host fields (name, host, username, password) are required' 
+        });
+      }
     }
 
     const job = new Job(req.body);
@@ -66,17 +73,6 @@ router.put('/:id', async (req, res) => {
     const existingJob = await Job.findById(req.params.id);
     if (!existingJob) {
       return res.status(404).json({ message: 'Job not found' });
-    }
-
-    // Validate interface and subnet if they're being updated
-    const { network_interface, subnet } = req.body;
-    if (network_interface && subnet) {
-      const isValid = await NetworkService.validateInterfaceSubnet(network_interface, subnet);
-      if (!isValid) {
-        return res.status(400).json({ 
-          message: 'Network interface does not have an IP address in the specified subnet' 
-        });
-      }
     }
 
     const job = new Job({ ...existingJob, ...req.body, id: req.params.id });
@@ -110,12 +106,12 @@ router.delete('/:id', async (req, res) => {
 // Run job manually
 router.post('/:id/run', async (req, res) => {
   try {
-    if (jobRunner.isJobRunning(req.params.id)) {
+    if (macScanRunner.isJobRunning(req.params.id)) {
       return res.status(409).json({ message: 'Job is already running' });
     }
 
     // Start job asynchronously
-    jobRunner.runJob(req.params.id).catch(error => {
+    macScanRunner.runJob(req.params.id).catch(error => {
       console.error(`Job ${req.params.id} failed:`, error);
     });
     
@@ -123,6 +119,112 @@ router.post('/:id/run', async (req, res) => {
   } catch (error) {
     console.error('Error starting job:', error);
     res.status(500).json({ message: 'Failed to start job' });
+  }
+});
+
+// Test SSH connection
+router.post('/:id/test-ssh/:hostId', async (req, res) => {
+  try {
+    const db = getDatabase();
+    const hostStmt = db.prepare('SELECT * FROM ssh_hosts WHERE id = ? AND job_id = ?');
+    const host = hostStmt.get(req.params.hostId, req.params.id);
+
+    if (!host) {
+      return res.status(404).json({ message: 'SSH host not found' });
+    }
+
+    const password = CryptoService.decrypt(host.password_encrypted);
+    const hostConfig = {
+      host: host.host,
+      port: host.port,
+      username: host.username,
+      password
+    };
+
+    const result = await sshService.testConnection(hostConfig);
+
+    // Update test status in database
+    const updateStmt = db.prepare(`
+      UPDATE ssh_hosts 
+      SET last_test = CURRENT_TIMESTAMP, test_status = ? 
+      WHERE id = ?
+    `);
+    updateStmt.run(result.success ? 'success' : 'failed', host.id);
+
+    res.json(result);
+  } catch (error) {
+    console.error('Error testing SSH connection:', error);
+    res.status(500).json({ message: 'Failed to test SSH connection' });
+  }
+});
+
+// Execute SSH command (console)
+router.post('/:id/ssh-console/:hostId', async (req, res) => {
+  try {
+    const { command } = req.body;
+    
+    if (!command) {
+      return res.status(400).json({ message: 'Command is required' });
+    }
+
+    const db = getDatabase();
+    const hostStmt = db.prepare('SELECT * FROM ssh_hosts WHERE id = ? AND job_id = ?');
+    const host = hostStmt.get(req.params.hostId, req.params.id);
+
+    if (!host) {
+      return res.status(404).json({ message: 'SSH host not found' });
+    }
+
+    const password = CryptoService.decrypt(host.password_encrypted);
+    const hostConfig = {
+      host: host.host,
+      port: host.port,
+      username: host.username,
+      password
+    };
+
+    const result = await sshService.executeCommand(hostConfig, command);
+
+    // Save console session
+    const sessionStmt = db.prepare(`
+      INSERT INTO ssh_console_sessions (id, job_id, host_id, command, output, error_message, duration)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    
+    const { v4: uuidv4 } = await import('uuid');
+    sessionStmt.run(
+      uuidv4(),
+      req.params.id,
+      req.params.hostId,
+      command,
+      result.output || '',
+      result.error || '',
+      result.duration || 0
+    );
+
+    res.json(result);
+  } catch (error) {
+    console.error('Error executing SSH command:', error);
+    res.status(500).json({ message: 'Failed to execute SSH command' });
+  }
+});
+
+// Get SSH console history
+router.get('/:id/ssh-console/:hostId/history', async (req, res) => {
+  try {
+    const db = getDatabase();
+    const stmt = db.prepare(`
+      SELECT * FROM ssh_console_sessions 
+      WHERE job_id = ? AND host_id = ? 
+      ORDER BY executed_at DESC 
+      LIMIT 50
+    `);
+    
+    const sessions = stmt.all(req.params.id, req.params.hostId);
+    res.json(sessions);
+  } catch (error) {
+    console.error('Error fetching SSH console history:', error);
+    res.status(500).json({ message: 'Failed to fetch SSH console history' });
   }
 });
 

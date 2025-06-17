@@ -26,8 +26,8 @@ export class NotificationService {
     const id = uuidv4();
     
     const stmt = db.prepare(`
-      INSERT INTO notifications (id, job_id, job_name, type, message, mac_address, ip_address)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO notifications (id, job_id, job_name, type, message, mac_address, host_name, interface_name)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     try {
@@ -38,7 +38,8 @@ export class NotificationService {
         notificationData.type,
         notificationData.message,
         notificationData.mac_address,
-        notificationData.ip_address
+        notificationData.host_name,
+        notificationData.interface_name || null
       );
 
       logger.info(`Notification created: ${notificationData.type} - ${notificationData.message}`);
